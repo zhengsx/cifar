@@ -10,9 +10,6 @@ from torch.autograd import Variable
 from models import resnet
 
 import numpy as np
-import multiverso as mv
-
-mv.init(sync=True, updater=b"sgd")
 
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Example')
@@ -36,9 +33,6 @@ parser.add_argument('--seed', type=int, default=1, metavar='S',
 parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                     help='how many batches to wait before logging training status')
 args = parser.parse_args()
-args.parallel = True if mv.workers_num() > 1 else False
-if args.parallel:
-    from multiverso.torch_ext import torchmodel
 
 if args.gpus is None or args.gpus is '':
     args.gpus = '0'
@@ -76,37 +70,28 @@ test_loader = torch.utils.data.DataLoader(
 
 
 model = resnet.resnet20()
-if args.parallel:
-    model = torchmodel.MVTorchModel(model)
-
+deviceId = 7
 if args.cuda:
-    model.cuda(devs[mv.worker_id()])
+    model.cuda(deviceId)
 
 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
 
 def train(epoch):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
-        if batch_idx % mv.workers_num() == mv.worker_id():
-            if args.cuda:
-                data, target = data.cuda(mv.worker_id()), target.cuda(mv.worker_id())
-            data, target = Variable(data), Variable(target)
-            optimizer.zero_grad()
-            output = model(data)
-            loss = F.nll_loss(output, target)
-            loss.backward()
-            optimizer.step()
+        if args.cuda:
+            data, target = data.cuda(deviceId), target.cuda(deviceId)
+        data, target = Variable(data), Variable(target)
+        optimizer.zero_grad()
+        output = model(data)
+        loss = F.nll_loss(output, target)
+        loss.backward()
+        optimizer.step()
 
-            if args.parallel:
-                model.cpu()
-                model.mv_sync()
-                if args.cuda:
-                    model.cuda(devs[mv.worker_id()])
-
-            if (batch_idx/mv.workers_num()) % args.log_interval == 0:
-                print('Worker: {}\tTrain Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                    mv.worker_id(), epoch, batch_idx * len(data), len(train_loader.dataset),
-                    100. * batch_idx / len(train_loader), loss.data[0]))
+        if batch_idx % args.log_interval == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                100. * batch_idx / len(train_loader), loss.data[0]))
 
 def test(epoch):
     model.eval()
@@ -123,10 +108,10 @@ def test(epoch):
 
     test_loss = test_loss
     test_loss /= len(test_loader) # loss function already averages over batch size
-    print('\nWorker: {}\tTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        mv.worker_id(), test_loss, correct, len(test_loader.dataset),
+    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+        test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
-
+ 
 for epoch in range(1, args.epochs + 1):
     train(epoch)
     test(epoch)
