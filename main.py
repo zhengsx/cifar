@@ -24,7 +24,7 @@ parser.add_argument('--epochs', type=int, default=160, metavar='N',
                     help='number of epochs to train (default: 160)')
 parser.add_argument('--lr', type=float, default=1.0, metavar='LR',
                     help='learning rate (default: 1.0)')
-parser.add_argument('--lr_decay', type=str, default='80,120'
+parser.add_argument('--lr_decay', type=str, default='80,120',
                         help='learning rate decay 0.1 when given epochs, e.g. 80,120.')
 parser.add_argument('--momentum', type=float, default=0, metavar='M',
                     help='SGD momentum (default: 0)')
