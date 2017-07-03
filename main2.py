@@ -38,7 +38,6 @@ if args.gpus is None or args.gpus is '':
     args.gpus = '0'
 args.cuda = not args.gpus == '-1' and torch.cuda.is_available()
 if args.cuda:
-    assert mv.workers_num() == len(args.gpus.split(','))
     devs = [int(i) for i in args.gpus.split(',')]
 torch.manual_seed(args.seed)
 if args.cuda:
@@ -70,9 +69,11 @@ test_loader = torch.utils.data.DataLoader(
 
 
 model = resnet.resnet20()
+criterion = torch.nn.CrossEntropyLoss()
 deviceId = 7
 if args.cuda:
     model.cuda(deviceId)
+    criterion.cuda(deviceId)
 
 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
 
@@ -84,7 +85,7 @@ def train(epoch):
         data, target = Variable(data), Variable(target)
         optimizer.zero_grad()
         output = model(data)
-        loss = F.nll_loss(output, target)
+        loss = criterion(output, target)
         loss.backward()
         optimizer.step()
 
@@ -99,10 +100,10 @@ def test(epoch):
     correct = 0
     for data, target in test_loader:
         if args.cuda:
-            data, target = data.cuda(mv.worker_id()), target.cuda(mv.worker_id())
+            data, target = data.cuda(deviceId), target.cuda(deviceId)
         data, target = Variable(data, volatile=True), Variable(target)
         output = model(data)
-        test_loss += F.nll_loss(output, target).data[0]
+        test_loss += criterion(output, target).data[0]
         pred = output.data.max(1)[1] # get the index of the max log-probability
         correct += pred.eq(target.data).cpu().sum()
 
