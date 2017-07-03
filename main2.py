@@ -8,6 +8,7 @@ from torchvision import datasets, transforms
 from torch.autograd import Variable
 
 from models import resnet
+from torch.optim import lr_scheduler
 
 import numpy as np
 
@@ -76,10 +77,12 @@ if args.cuda:
     criterion.cuda(deviceId)
 
 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
+scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(i) in args.lr_decay.split(',')], gamma=0.1)
 
 def train(epoch):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
+        scheduler.step()
         if args.cuda:
             data, target = data.cuda(deviceId), target.cuda(deviceId)
         data, target = Variable(data), Variable(target)
