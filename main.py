@@ -8,11 +8,9 @@ from torchvision import datasets, transforms
 from torch.autograd import Variable
 
 from models import resnet
+from torch.optim import lr_scheduler
 
 import numpy as np
-import multiverso as mv
-
-mv.init(sync=True, updater=b"sgd")
 
 # Training settings
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Example')
@@ -31,82 +29,75 @@ parser.add_argument('--momentum', type=float, default=0, metavar='M',
 parser.add_argument('--decay', type=float, default=0.0005, help='Weight decay (L2 penalty).')
 parser.add_argument('--gpus', type=str,
                        help='list of gpus to run, e.g. 0 or 0,2,5. empty means using gpu 0, -1 means using cpu.')
+parser.add_argument('--ngpu', type=int, default=1, help='0 = CPU.')
 parser.add_argument('--seed', type=int, default=1, metavar='S',
                     help='random seed (default: 1)')
 parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                     help='how many batches to wait before logging training status')
 args = parser.parse_args()
-args.parallel = True if mv.workers_num() > 1 else False
-if args.parallel:
-    from multiverso.torch_ext import torchmodel
 
 if args.gpus is None or args.gpus is '':
     args.gpus = '0'
 args.cuda = not args.gpus == '-1' and torch.cuda.is_available()
 if args.cuda:
-    assert mv.workers_num() == len(args.gpus.split(','))
     devs = [int(i) for i in args.gpus.split(',')]
 torch.manual_seed(args.seed)
 if args.cuda:
     torch.cuda.manual_seed(args.seed)
 
 
-kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
+kwargs = {'num_workers': 1, 'pin_memory': False} if args.cuda else {}
 
 train_loader = torch.utils.data.DataLoader(
     datasets.CIFAR10('../data', train=True, download=True,
                     transform=transforms.Compose([
+			    transforms.RandomHorizontalFlip(),
                         transforms.RandomCrop(32, padding=4),
-                        # transforms.RandomHorizontalFlip(),
                         transforms.ToTensor(),
-                        transforms.Normalize(mean=[0.5071, 0.4867, 0.4408],
-                                             std=[0.2675, 0.2565, 0.2761])
+			transforms.Normalize(mean = [x / 255 for x in [125.3, 123.0, 113.9]],
+				std = [x / 255 for x in [63.0, 62.1, 66.7]])
                         ])),
     batch_size=args.batch_size, shuffle=True, **kwargs)
 test_loader = torch.utils.data.DataLoader(
     datasets.CIFAR10('../data', train=False,
                     transform=transforms.Compose([
-                        transforms.RandomCrop(32, padding=4),
-                        # transforms.RandomHorizontalFlip(),
                         transforms.ToTensor(),
-                        transforms.Normalize(mean=[0.5071, 0.4867, 0.4408],
-                                             std=[0.2675, 0.2565, 0.2761])
+transforms.Normalize(mean = [x / 255 for x in [125.3, 123.0, 113.9]],
+        std = [x / 255 for x in [63.0, 62.1, 66.7]])
                         ])),
     batch_size=args.batch_size, shuffle=False, **kwargs)
 
 
 model = resnet.resnet20()
-if args.parallel:
-    model = torchmodel.MVTorchModel(model)
+criterion = torch.nn.CrossEntropyLoss()
+
+if args.ngpu > 1:
+        model = torch.nn.DataParallel(model, device_ids=list(range(args.ngpu)))
 
 if args.cuda:
-    model.cuda(devs[mv.worker_id()])
+    model.cuda()
+    criterion.cuda()
 
 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
+scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(i) for i in args.lr_decay.split(',')], gamma=0.1)
 
 def train(epoch):
     model.train()
+    scheduler.step()
     for batch_idx, (data, target) in enumerate(train_loader):
-        if batch_idx % mv.workers_num() == mv.worker_id():
-            if args.cuda:
-                data, target = data.cuda(mv.worker_id()), target.cuda(mv.worker_id())
-            data, target = Variable(data), Variable(target)
-            optimizer.zero_grad()
-            output = model(data)
-            loss = F.nll_loss(output, target)
-            loss.backward()
-            optimizer.step()
+        if args.cuda:
+            data, target = data.cuda(), target.cuda()
+        data, target = Variable(data), Variable(target)
+        optimizer.zero_grad()
+        output = model(data)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
 
-            if args.parallel:
-                model.cpu()
-                model.mv_sync()
-                if args.cuda:
-                    model.cuda(devs[mv.worker_id()])
-
-            if (batch_idx/mv.workers_num()) % args.log_interval == 0:
-                print('Worker: {}\tTrain Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                    mv.worker_id(), epoch, batch_idx * len(data), len(train_loader.dataset),
-                    100. * batch_idx / len(train_loader), loss.data[0]))
+        if batch_idx % args.log_interval == 0:
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                epoch, batch_idx * len(data), len(train_loader.dataset),
+                100. * batch_idx / len(train_loader), loss.data[0]))
 
 def test(epoch):
     model.eval()
@@ -114,19 +105,19 @@ def test(epoch):
     correct = 0
     for data, target in test_loader:
         if args.cuda:
-            data, target = data.cuda(mv.worker_id()), target.cuda(mv.worker_id())
+            data, target = data.cuda(), target.cuda()
         data, target = Variable(data, volatile=True), Variable(target)
         output = model(data)
-        test_loss += F.nll_loss(output, target).data[0]
+        test_loss += criterion(output, target).data[0]
         pred = output.data.max(1)[1] # get the index of the max log-probability
         correct += pred.eq(target.data).cpu().sum()
 
     test_loss = test_loss
     test_loss /= len(test_loader) # loss function already averages over batch size
-    print('\nWorker: {}\tTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        mv.worker_id(), test_loss, correct, len(test_loader.dataset),
+    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+        test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
-
+ 
 for epoch in range(1, args.epochs + 1):
     train(epoch)
     test(epoch)
