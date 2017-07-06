@@ -44,7 +44,11 @@ torch.manual_seed(args.seed)
 if args.cuda:
     torch.cuda.manual_seed(args.seed)
 
-args.ngpu = len(args.gpus.split(,))
+args.parallel = True if len(devs) > 1 else False
+if args.parallel:
+    import multiverso as mv
+    from multiverso.torch_ext import torchmodel
+    mv.init(sync=True, updater=b"sgd")   
 
 
 kwargs = {'num_workers': 1, 'pin_memory': False} if args.cuda else {}
@@ -72,12 +76,15 @@ transforms.Normalize(mean = [x / 255 for x in [125.3, 123.0, 113.9]],
 model = resnet.resnet20()
 criterion = torch.nn.CrossEntropyLoss()
 
-if args.ngpu > 1:
-        model = torch.nn.DataParallel(model, device_ids=list(range(args.ngpu)))
+# if args.ngpu > 1:
+#         model = torch.nn.DataParallel(model, device_ids=list(range(args.ngpu)))
+if args.parallel:
+    model = torchmodel.MVTorchModel(model)
 
 if args.cuda:
-    model.cuda()
-    criterion.cuda()
+    device = devs[0] if args.parallel else devs[mv.worker_id()]
+    model.cuda(device)
+    criterion.cuda(device)
 
 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
 scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(i) for i in args.lr_decay.split(',')], gamma=0.1)
@@ -87,7 +94,7 @@ def train(epoch):
     scheduler.step()
     for batch_idx, (data, target) in enumerate(train_loader):
         if args.cuda:
-            data, target = data.cuda(), target.cuda()
+            data, target = data.cuda(device), target.cuda(device)
         data, target = Variable(data), Variable(target)
         optimizer.zero_grad()
         output = model(data)
@@ -100,13 +107,43 @@ def train(epoch):
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader), loss.data[0]))
 
+def paralleltrain(epoch):
+    model.train()
+    scheduler.step()
+    for batch_idx, (data, target) in enumerate(train_loader):
+        if batch_idx % mv.workers_num() != mv.worker_id():
+            continue
+        if args.cuda:
+            data, target = data.cuda(device), target.cuda(device)
+        data, target = Variable(data), Variable(target)
+        optimizer.zero_grad()
+        output = model(data)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
+
+        model.cpu()
+        model.mv_sync()
+        model.cuda(device)
+
+        if (batch_idx / mv.workers_num()) % args.log_interval == 0:
+            print('Worker: {}\tTrain Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                    mv.worker_id(), epoch, batch_idx * len(data), len(train_loader.dataset),
+                    100. * batch_idx / len(train_loader), loss.data[0]))
+
+    if batch_idx % mv.workers_num() < mv.worker_id():
+        optimizer.zero_grad()
+        model.cpu()
+        model.mv_sync()
+        model.cuda(device)
+
 def test(epoch):
     model.eval()
     test_loss = 0
     correct = 0
     for data, target in test_loader:
         if args.cuda:
-            data, target = data.cuda(), target.cuda()
+            data, target = data.cuda(device), target.cuda(device)
         data, target = Variable(data, volatile=True), Variable(target)
         output = model(data)
         test_loss += criterion(output, target).data[0]
@@ -115,10 +152,15 @@ def test(epoch):
 
     test_loss = test_loss
     test_loss /= len(test_loader) # loss function already averages over batch size
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(test_loader.dataset),
-        100. * correct / len(test_loader.dataset)))
+    if args.parallel:
+        print('\nWorker: {}\tTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+            mv.worker_id(), test_loss, correct, len(test_loader.dataset),
+            100. * correct / len(test_loader.dataset)))
+    else:
+        print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+            test_loss, correct, len(test_loader.dataset),
+            100. * correct / len(test_loader.dataset)))
  
 for epoch in range(1, args.epochs + 1):
-    train(epoch)
+    paralleltrain(epoch) if args.parallel else train(epoch)
     test(epoch)
